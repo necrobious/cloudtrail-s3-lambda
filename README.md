@@ -1,6 +1,6 @@
 cloudtrail-s3-lambda
 ====================
-*NOTE: This in a work-in-progress, it works for my needs, but YMMV, I do not advise deploying this into a produciton AWS account, unless you know what you are doing.*
+**NOTE: This in a work-in-progress, it works for my needs, but YMMV, I do not advise deploying this into a produciton AWS account, unless you know what you are doing.**
 
 A simple POC of a rust lambda for searching CloudTrail logs and publishing matches to an SNS topic.
 inspired by: https://docs.aws.amazon.com/lambda/latest/dg/with-cloudtrail-example.html
