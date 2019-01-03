@@ -1,0 +1,26 @@
+[package]
+name = "cloudtrail-s3-lambda"
+version = "0.1.0"
+authors = ["Kirk Peterson <necrobious@gmail.com>"]
+edition = "2018"
+autobins = false
+
+[dependencies]
+lambda_runtime = "0.1"
+serde = "^1"
+serde_json = "^1"
+serde_derive = "^1"
+log = "^0.4"
+simple_logger = "^1"
+aws_lambda_events = "^0.2.0"
+rusoto_core = "0.36.0"
+rusoto_sns = "0.36.0"
+rusoto_s3 = "0.36.0"
+libflate = "0.1"
+jmespath = { version = "^0.2.0", features = ["sync"] }
+lazy_static = "^1.2.0"
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
