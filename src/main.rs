@@ -145,9 +145,14 @@ fn my_handler(input: Value, ctx: lambda::Context) -> Result<String, HandlerError
     }
 }
 
-#[test]
-fn test_s3_req_extract () {
-    let evnt_json = r###"
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_s3_req_extract() {
+        let evnt_json = r###"
 {
   "Records": [
     {
@@ -189,15 +194,16 @@ fn test_s3_req_extract () {
   ]
 }
 "###;
-    let event = serde_json::from_str(evnt_json);
+        let event = serde_json::from_str(evnt_json);
 
-    assert!(event.is_ok());
+        assert!(event.is_ok());
 
-    let reqs = s3_get_obj_req_from_s3_event(event.unwrap());
+        let reqs = s3_get_obj_req_from_s3_event(event.unwrap());
 
-    assert_eq!(1,reqs.len());
+        assert_eq!(1, reqs.len());
 
-    assert_eq!("HappyFace.jpg", reqs[0].key);
-    assert_eq!("sourcebucket", reqs[0].bucket);
-
+        assert_eq!("HappyFace.jpg", reqs[0].key);
+        assert_eq!("sourcebucket", reqs[0].bucket);
+    }
 }
+
