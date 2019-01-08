@@ -42,7 +42,15 @@ impl Display for CloudTrailError {
     }
 }
 
-impl Error for CloudTrailError {}
+impl Error for CloudTrailError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        use self::CloudTrailError::*;
+        match *self {
+            GenericS3GetObjectError(ref e) => Some(e),
+            _ => None
+        }
+    }
+}
 
 impl CloudTrailError {
     pub fn convert_to_cloudtrail_error(&self, ctx: &lambda::Context) -> HandlerError {
