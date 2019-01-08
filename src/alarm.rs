@@ -1,11 +1,12 @@
-use jmespath::{Variable,Expression};
+use jmespath::{Expression, Variable};
 
 use std::fs::File;
 
-use serde_json::{self, Value, Result as JsonResult};
 use serde_json::map::Map;
+use serde_json::{self, Result as JsonResult, Value};
 
 use crate::alert;
+use crate::errors::CloudTrailError::{self, AlarmError};
 
 lazy_static! {
     static ref ALARMS: Vec<alert::Alert> = {
@@ -23,51 +24,50 @@ lazy_static! {
     };
 }
 
-pub struct Alarms {
-}
+pub struct Alarms {}
 
 impl Alarms {
-    pub fn detect(events:&Value) -> Result<Vec<Value>, String> {
+    pub fn detect(events: &Value) -> Result<Vec<Value>, CloudTrailError> {
         let data = Variable::from(events);
-        let mut accum:Vec<Value> = Vec::new();
+        let mut accum: Vec<Value> = Vec::new();
         for alarm in ALARMS.iter() {
-            let key  = alarm.key.to_string();
+            let key = alarm.key.to_string();
             let expr = &alarm.expr;
 
             match expr.search(&data) {
-                Err(e) => { return Err(e.to_string()) },
-                Ok(var) => {
-
-                    match var.as_array() {
-                        Some(ref vec) => {
-                            for rcvar in vec.iter() {
-                                match serde_json::to_value(rcvar) {
-                                    Ok(json_event) => {
-                                        let mut om = Map::new();
-                                        om.insert("event".to_string(),json_event);
-                                        om.insert("alert".to_string(),Value::String(key.clone()));
-                                        let json_object = Value::Object(om);
-                                        accum.push(json_object);
-                                    },
-                                    Err(e) => { return Err(e.to_string()) }
+                Err(e) => return Err(AlarmError(e.to_string())),
+                Ok(var) => match var.as_array() {
+                    Some(ref vec) => {
+                        for rcvar in vec.iter() {
+                            match serde_json::to_value(rcvar) {
+                                Ok(json_event) => {
+                                    let mut om = Map::new();
+                                    om.insert("event".to_string(), json_event);
+                                    om.insert("alert".to_string(), Value::String(key.clone()));
+                                    let json_object = Value::Object(om);
+                                    accum.push(json_object);
                                 }
+                                Err(e) => return Err(AlarmError(e.to_string())),
                             }
-                        },
-                        None => {
-                            return Err("Unexpected result: Expected an instance of jmespath::Variable::Array()".to_string())
                         }
                     }
-
-                }
+                    None => return Err(AlarmError(
+                        "Unexpected result: Expected an instance of jmespath::Variable::Array()"
+                            .to_string(),
+                    )),
+                },
             }
-
         }
         Ok(accum)
     }
 }
 
-fn root_user_activity () -> &'static str  {
-r###"
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root_user_activity() -> &'static str {
+        r###"
 {
     "Records":[
         {
@@ -156,37 +156,78 @@ r###"
         }
 ]}
 "###
-}
+    }
 
-#[test]
-fn test_expressions () {
+    #[test]
+    fn test_expressions() {
+        let root_login_events_parse_result: JsonResult<Value> =
+            serde_json::from_str(root_user_activity());
 
-	let root_login_events_parse_result:JsonResult<Value> = serde_json::from_str(root_user_activity());
+        assert!(root_login_events_parse_result.is_ok());
 
-    assert!(root_login_events_parse_result.is_ok());
+        let events = root_login_events_parse_result.unwrap();
 
-	let events = root_login_events_parse_result.unwrap();
+        let r = Alarms::detect(&events);
 
-    let r = Alarms::detect(&events);
+        assert!(r.is_ok());
 
-    assert!(r.is_ok());
+        let rv = r.unwrap();
 
-    let rv = r.unwrap();
+        assert_eq!(3, rv.len());
 
-    assert_eq!(3,rv.len());
+        let expr_parse_result = jmespath::compile("alert");
 
-	let expr_parse_result = jmespath::compile("alert");
+        assert!(expr_parse_result.is_ok());
 
-    assert!(expr_parse_result.is_ok());
+        let expr = expr_parse_result.unwrap();
 
-    let expr = expr_parse_result.unwrap();
+        let mut root_activity_counter = 0;
+        let mut login_failure_counter = 0;
 
-    let mut root_activity_counter = 0;
-    let mut login_failure_counter = 0;
+        for e in rv {
+            let data = Variable::from(e);
 
-    for e in rv {
+            let query_result = expr.search(data);
 
-        let data = Variable::from(e);
+            assert!(query_result.is_ok());
+
+            let query = query_result.unwrap();
+
+            assert!(query.is_string());
+
+            let query_key = query.as_string().unwrap();
+
+            if query_key == "DETECT_ROOT_ACTIVITY" {
+                root_activity_counter += 1;
+            }
+            if query_key == "DETECT_CONSOLE_LOGIN_FAILURES" {
+                login_failure_counter += 1;
+            }
+        }
+
+        assert_eq!(2, root_activity_counter);
+        assert_eq!(1, login_failure_counter);
+    }
+
+    #[test]
+    fn test_root_user_activity_detection() {
+        // see https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-aws-console-sign-in-events.html
+        let root_login_events = root_user_activity();
+
+        let root_login_events_parse_result: JsonResult<Value> =
+            serde_json::from_str(root_login_events);
+
+        assert!(root_login_events_parse_result.is_ok());
+
+        let events = root_login_events_parse_result.unwrap();
+
+        let expr_parse_result = jmespath::compile("Records[?userIdentity.type == 'Root' && userIdentity.invokedBy == null && eventType != 'AwsServiceEvent']");
+
+        assert!(expr_parse_result.is_ok());
+
+        let expr = expr_parse_result.unwrap();
+
+        let data = Variable::from(events);
 
         let query_result = expr.search(data);
 
@@ -194,53 +235,10 @@ fn test_expressions () {
 
         let query = query_result.unwrap();
 
-        assert!(query.is_string());
+        assert!(query.is_array());
 
-        let query_key = query.as_string().unwrap();
+        let v = query.as_array().unwrap();
 
-        if query_key == "DETECT_ROOT_ACTIVITY" {
-            root_activity_counter += 1;
-        }
-        if query_key == "DETECT_CONSOLE_LOGIN_FAILURES" {
-            login_failure_counter += 1;
-        }
-
+        assert_eq!(2, v.len());
     }
-
-    assert_eq!(2, root_activity_counter);
-    assert_eq!(1, login_failure_counter);
-}
-
-#[test]
-fn test_root_user_activity_detection () {
-
-	// see https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-aws-console-sign-in-events.html
-    let root_login_events = root_user_activity();
-
-	let root_login_events_parse_result:JsonResult<Value> = serde_json::from_str(root_login_events);
-
-    assert!(root_login_events_parse_result.is_ok());
-
-	let events = root_login_events_parse_result.unwrap();
-
-	let expr_parse_result = jmespath::compile("Records[?userIdentity.type == 'Root' && userIdentity.invokedBy == null && eventType != 'AwsServiceEvent']");
-
-    assert!(expr_parse_result.is_ok());
-
-    let expr = expr_parse_result.unwrap();
-
-    let data = Variable::from(events);
-
-    let query_result = expr.search(data);
-
-    assert!(query_result.is_ok());
-
-    let query = query_result.unwrap();
-
-    assert!(query.is_array());
-
-    let v = query.as_array().unwrap();
-
-    assert_eq!(2, v.len());
-
 }

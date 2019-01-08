@@ -1,8 +1,8 @@
-use jmespath::{Variable,Expression};
+use jmespath::{Expression, Variable};
 
 pub struct Alert {
     pub key: &'static str,
-    pub expr: Expression<'static>
+    pub expr: Expression<'static>,
 }
 
 pub fn detect_root_activity() -> Alert {
@@ -19,10 +19,13 @@ pub fn detect_cloudtrail_changes() -> Alert {
     }
 }
 
-pub fn detect_console_login_failures () -> Alert {
+pub fn detect_console_login_failures() -> Alert {
     Alert {
         key: "DETECT_CONSOLE_LOGIN_FAILURES",
-        expr: jmespath::compile("Records[?eventName == 'ConsoleLogin' && errorMessage == 'Failed authentication']").unwrap()
+        expr: jmespath::compile(
+            "Records[?eventName == 'ConsoleLogin' && errorMessage == 'Failed authentication']",
+        )
+        .unwrap(),
     }
 }
 
@@ -53,4 +56,3 @@ pub fn detect_virtual_private_cloud_changes() -> Alert {
         expr: jmespath::compile("Records[?eventName == 'CreateVpc' || eventName == 'DeleteVpc' || eventName == 'ModifyVpcAttribute' || eventName == 'AcceptVpcPeeringConnection' || eventName == 'CreateVpcPeeringConnection' || eventName == 'DeleteVpcPeeringConnection' || eventName == 'RejectVpcPeeringConnection' || eventName == 'AttachClassicLinkVpc' || eventName == 'DetachClassicLinkVpc' || eventName == 'DisableVpcClassicLink' || eventName == 'EnableVpcClassicLink']").unwrap()
     }
 }
-

@@ -7,32 +7,33 @@ extern crate lambda_runtime as lambda;
 #[macro_use]
 extern crate log;
 
-extern crate simple_logger;
 extern crate aws_lambda_events;
+extern crate jmespath;
+extern crate libflate;
 extern crate rusoto_core;
 extern crate rusoto_sns;
-extern crate libflate;
-extern crate jmespath;
+extern crate simple_logger;
 
-use std::env;
-use std::fmt;
-use std::default::Default;
-use serde_json::{self, Value};
+mod alarm;
+mod alert;
+mod errors;
+
+use aws_lambda_events::event::s3::S3Event;
 use serde_json::de::from_reader;
 use serde_json::error::Error as SerdeError;
-use aws_lambda_events::event::s3::S3Event;
+use serde_json::{self, Value};
+use std::default::Default;
+use std::env;
+use std::fmt;
 
-use rusoto_core::Region;
 use rusoto_core::request::BufferedHttpResponse;
-use rusoto_s3::{S3, S3Client, GetObjectRequest, GetObjectOutput, GetObjectError, StreamingBody};
-use rusoto_sns::{Sns, SnsClient, PublishInput, PublishResponse};
-use libflate::gzip::Decoder;
+use rusoto_core::Region;
+use rusoto_s3::{GetObjectError, GetObjectRequest, S3Client, S3};
+use rusoto_sns::{PublishInput, PublishResponse, Sns, SnsClient};
 
+use crate::errors::CloudTrailError;
 use lambda::error::HandlerError;
 use std::error::Error;
-
-mod alert;
-mod alarm;
 
 fn main() -> Result<(), Box<dyn Error>> {
     simple_logger::init_with_level(log::Level::Info)?;
@@ -41,110 +42,100 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn s3_get_obj_req_from_s3_event (s3_event:S3Event) -> Vec<GetObjectRequest> {
-    let mut res = Vec::new();
+fn s3_get_obj_req_from_s3_event(s3_event: S3Event) -> Vec<GetObjectRequest> {
     let recs = s3_event.records;
-    for rec in recs.iter() {
-        match (&rec.s3.bucket.name, &rec.s3.object.key) {
-            (None, _) | (_,None) => { continue },
-            (Some(bucket), Some(key)) => {
-                res.push(GetObjectRequest {
-                    bucket: bucket.to_string(),
-                    key: key.to_string(),
-                    ..Default::default()
-                })
-            }
-        }
-    }
-    res
+    recs.iter()
+        .flat_map(|rec| match (&rec.s3.bucket.name, &rec.s3.object.key) {
+            (Some(bucket), Some(key)) => vec![GetObjectRequest {
+                bucket: bucket.to_string(),
+                key: key.to_string(),
+                ..Default::default()
+            }],
+            _ => vec![],
+        })
+        .collect()
 }
 
-fn do_error <E> (e: E, ctx:lambda::Context) -> Result<String, HandlerError> where E: ToString {
+fn do_error<E>(e: E, ctx: &lambda::Context) -> Result<String, HandlerError>
+where
+    E: ToString,
+{
     Err(ctx.new_error(e.to_string().as_str()))
 }
 
+fn fetch_finding(client: &S3Client, req: &GetObjectRequest) -> Result<Vec<Value>, CloudTrailError> {
+    client
+        .get_object(req.clone())
+        .sync()
+        .map_err(|e| match e {
+            GetObjectError::Unknown(BufferedHttpResponse { status: s, .. })
+                if s.as_u16() == 403 =>
+            {
+                CloudTrailError::new_s3get_object_auth_error(req.key.clone(), req.bucket.clone())
+            }
+            _ => CloudTrailError::GenericS3GetObjectError(e),
+        })
+        .and_then(|go| go.body.ok_or(CloudTrailError::MissingS3Body))
+        .map(|body_stream| body_stream.into_blocking_read())
+        .and_then(|blocking_reader| {
+            serde_json::from_reader(blocking_reader)
+                .map_err(|_e| CloudTrailError::S3BodyReaderError)
+        })
+        .and_then(|ref v| alarm::Alarms::detect(v))
+}
+
+fn fetch_findings(client: &S3Client, input: &Value) -> Result<Vec<Value>, CloudTrailError> {
+    let s3_event =
+        serde_json::from_value(input.clone()).map_err(|_e| CloudTrailError::InputJsonError)?;
+
+    let events = s3_get_obj_req_from_s3_event(s3_event);
+
+    let mut findings = Vec::new();
+    for event in events {
+        let finding = fetch_finding(client, &event)?;
+        findings.extend(finding);
+    }
+    Ok(findings)
+}
 
 fn my_handler(input: Value, ctx: lambda::Context) -> Result<String, HandlerError> {
     //let alert_topic_arn  = env::var("ALERTS_TOPIC_ARN").map_err(|e| ctx.new_error(e.to_string().as_str()))?;
-    let alert_topic_arn  = env::var("ALERTS_TOPIC_ARN");
+    let alert_topic_arn = env::var("ALERTS_TOPIC_ARN");
     if alert_topic_arn.is_err() {
-        return do_error("Expected ALERTS_TOPIC_ARN to be set in env", ctx);
+        return do_error("Expected ALERTS_TOPIC_ARN to be set in env", &ctx);
     }
 
     let sns_client = SnsClient::new(Region::UsWest2);
     let s3_client = S3Client::new(Region::UsWest2);
 
-    let s3_event = serde_json::from_value(input);
-    if s3_event.is_err() {
-        return do_error("Expected an s3 event as input, got someting else", ctx)
-    }
-
-    let mut findings:Vec<Value> = Vec::new();
-
-    for s3_req in s3_get_obj_req_from_s3_event(s3_event.unwrap()).iter() {
-        match s3_client.get_object(s3_req.clone()).sync() {
-            Ok(GetObjectOutput{body:Some(stream),..}) => {
-                let mut reader = stream.into_blocking_read();
-                match Decoder::new(&mut reader) {
-                    Ok(decoder) => {
-                        let json:Result<Value, SerdeError>  = from_reader(decoder);
-                        match json {
-                            Ok(value) => {
-                                match alarm::Alarms::detect(&value) {
-                                    Ok(matched_events) => {
-                                        for event in matched_events.iter() {
-                                            findings.push(event.clone())
-                                        }
-                                    },
-                                    Err(e) => { return do_error(e,ctx) }
-                                }
-                            },
-                            Err(e) => { return do_error(e,ctx) },
-                        }
-                    },
-                    Err(e) => return do_error(e,ctx),
-                }
-            },
-            Ok(GetObjectOutput{body:None,..}) => {
-                return do_error("Valid response from S3, but no data. Exiting",ctx) // Err(ctx.new_error("Valid response from S3, but no data. Exiting"))
-            },
-            Err(GetObjectError::Unknown(BufferedHttpResponse{status: s, ..})) if s.as_u16() == 403 => {
-                let msg = format!("Not Authorized to access the  {} object with the {} bucket in S3. \
-                           Check that this Lambda's IAM Role has a policy with an effect of \
-                           Allow to the s3:GetObject action on your S3 resource.", s3_req.key, s3_req.bucket );
-                return do_error(msg.as_str(),ctx)
-            },
-            Err(e) => { return do_error(e.to_string(), ctx) /*Err(ctx.new_error(e.to_string().as_str()))*/ },
-        }
-    }
+    let findings =
+        fetch_findings(&s3_client, &input).map_err(|e| e.convert_to_cloudtrail_error(&ctx))?;
 
     let len = findings.len();
 
     if len > 0 {
         let msg_json = Value::Array(findings);
-        let msg = serde_json::to_string(&msg_json);//.map_err(|e| ctx.new_error(e.to_string().as_str()))?;
-        if msg.is_err() {
-            return do_error("Unable to serialize findings into a JSON string", ctx)
-        }
+        let msg = serde_json::to_string(&msg_json)
+            .map_err(|_e| ctx.new_error("Unable to serialize findings into a JSON string"))?;
 
         let request = PublishInput {
-            message: msg.unwrap(),
+            message: msg,
             topic_arn: Some(alert_topic_arn.unwrap()),
             ..Default::default()
         };
 
-        let publish_result = sns_client.publish(request).sync();
-        if publish_result.is_err() {
-            return do_error(format!("Attempt to publish {} alarm events failed!", len), ctx);
-        }
-        return Ok(format!("{} alarm events found", len));
+        let _publish_result = sns_client.publish(request).sync().map_err(|e| {
+            eprintln!("Attempt to publish {} alarm events failed!", len);
+            // it is sort of lame that new_error only takes a &str as all we can
+            // do is pass the description easily from map_err and description is deprecated
+            ctx.new_error(e.description())
+        })?;
 
-    }
-    else {
+        return Ok(format!("{} alarm events found", len));
+    } else {
         return Ok("All Clear".to_string());
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -206,4 +197,3 @@ mod tests {
         assert_eq!("sourcebucket", reqs[0].bucket);
     }
 }
-
