@@ -1,4 +1,4 @@
-use jmespath::{Expression, Variable};
+use jmespath::Expression;
 
 pub struct Alert {
     pub key: &'static str,

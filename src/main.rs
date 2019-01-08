@@ -4,7 +4,6 @@ extern crate lazy_static;
 #[macro_use]
 extern crate lambda_runtime as lambda;
 
-#[macro_use]
 extern crate log;
 
 extern crate aws_lambda_events;
@@ -19,17 +18,14 @@ mod alert;
 mod errors;
 
 use aws_lambda_events::event::s3::S3Event;
-use serde_json::de::from_reader;
-use serde_json::error::Error as SerdeError;
 use serde_json::{self, Value};
 use std::default::Default;
 use std::env;
-use std::fmt;
 
 use rusoto_core::request::BufferedHttpResponse;
 use rusoto_core::Region;
 use rusoto_s3::{GetObjectError, GetObjectRequest, S3Client, S3};
-use rusoto_sns::{PublishInput, PublishResponse, Sns, SnsClient};
+use rusoto_sns::{PublishInput, Sns, SnsClient};
 
 use crate::errors::CloudTrailError;
 use lambda::error::HandlerError;

@@ -1,9 +1,7 @@
-use jmespath::{Expression, Variable};
-
-use std::fs::File;
+use jmespath::Variable;
 
 use serde_json::map::Map;
-use serde_json::{self, Result as JsonResult, Value};
+use serde_json::{self, Value};
 
 use crate::alert;
 use crate::errors::CloudTrailError::{self, AlarmError};
@@ -65,6 +63,7 @@ impl Alarms {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Result as JsonResult;
 
     fn root_user_activity() -> &'static str {
         r###"
